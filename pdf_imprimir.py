@@ -28,7 +28,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 #  CONSTANTES GLOBAIS
 # ==============================================================================
 
-VERSION = "2.7.0 (Strict Tab Val & Fast Abort)"
+VERSION = "2.8.0 (Strict Click + REAP Anual)"
 CHROME_DEBUG_PORT = 9222
 BASE_DIR = r"C:\chrome_reap"
 
@@ -67,7 +67,7 @@ class ProgressPopup(ctk.CTkToplevel):
     def __init__(self, master):
         super().__init__(master)
         self.title("Baixando Documentos")
-        self.geometry("450x260")
+        self.geometry("520x320")
         self.attributes("-topmost", True)
         self.protocol("WM_DELETE_WINDOW", self.bloquear_fechamento) 
         
@@ -82,6 +82,9 @@ class ProgressPopup(ctk.CTkToplevel):
         
         self.lbl_certificado = ctk.CTkLabel(self.frame_status, text="Certificado de regularidade... [Aguardando]", font=("Segoe UI", 12))
         self.lbl_certificado.pack(anchor="w", pady=5)
+
+        self.lbl_reap = ctk.CTkLabel(self.frame_status, text="REAP anual... [Aguardando]", font=("Segoe UI", 12))
+        self.lbl_reap.pack(anchor="w", pady=5)
         
         self.btn_ok = ctk.CTkButton(self, text="Processando...", state="disabled", command=self.fechar_popup, fg_color="#475569")
         self.btn_ok.pack(pady=(20, 10))
@@ -99,6 +102,8 @@ class ProgressPopup(ctk.CTkToplevel):
             self.lbl_carteira.configure(text=f"Carteira de pescador... [{status_texto}]", text_color=cor)
         elif etapa == "certificado":
             self.lbl_certificado.configure(text=f"Certificado de regularidade... [{status_texto}]", text_color=cor)
+        elif etapa == "reap":
+            self.lbl_reap.configure(text=f"REAP anual... [{status_texto}]", text_color=cor)
         elif etapa == "fim":
             self.btn_ok.configure(state="normal", text="Concluir e Fechar", fg_color="#10B981", hover_color="#059669")
             self.protocol("WM_DELETE_WINDOW", self.fechar_popup) 
@@ -402,6 +407,125 @@ class AutomationLogic:
         except NoSuchElementException:
             self.driver.execute_script("arguments[0].click();", card_escolhido)
 
+    def abrir_manutencao_seguro(self):
+        """Garante contexto na página de manutenções e aborta em caso de redirecionamento para login."""
+        self.ir_para_home_seguro()
+        self.driver.get("https://pesqbrasil-pescadorprofissional.mpa.gov.br/manutencao")
+        time.sleep(1.2)
+        if "login" in self.driver.current_url.lower():
+            raise Exception("ABORT_LOGIN")
+
+        WebDriverWait(self.driver, 6).until(
+            EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'table-title') and contains(., 'Minhas manutenções')]"))
+        )
+
+    def coletar_reaps_enviados(self):
+        """Retorna anos/referências com situação enviada e botão de PDF disponível."""
+        script = """
+        const linhas = Array.from(document.querySelectorAll('table tbody tr'));
+        const saida = [];
+        for (const tr of linhas) {
+            const tds = tr.querySelectorAll('td');
+            if (tds.length < 8) continue;
+
+            const ano = (tds[5].innerText || '').trim();
+            const situacao = (tds[6].innerText || '').trim().toLowerCase();
+            const btnPdf = tds[7].querySelector("button[aria-label='visualizar_2a_via']");
+
+            if ((situacao.includes('enviado') || situacao.includes('enviada')) && btnPdf) {
+                saida.push({
+                    ano: ano,
+                    btnId: btnPdf.id || ''
+                });
+            }
+        }
+        return saida;
+        """
+        itens = self.driver.execute_script(script) or []
+
+        referencias = []
+        for item in itens:
+            ano = str(item.get("ano", "")).strip()
+            btn_id = str(item.get("btnId", "")).strip()
+            if ano and btn_id:
+                referencias.append({"ano": ano, "btn_id": btn_id})
+        return referencias
+
+    def baixar_reaps_enviados(self, nome_pescador, pasta_destino, ui_callback):
+        self.check_stop()
+        ui_callback("reap", "Buscando anos enviados...", "#FACC15")
+
+        try:
+            self.abrir_manutencao_seguro()
+            itens = self.coletar_reaps_enviados()
+        except Exception as e:
+            if "ABORT_" in str(e):
+                ui_callback("reap", "Erro: Aba incorreta / Deslogado", "#EF4444")
+                return "ABORT_ALL"
+            self.logger.error(f"Erro ao abrir manutenção: {e}")
+            ui_callback("reap", "Falha ao ler manutenção", "#EF4444")
+            return False
+
+        total = len(itens)
+        if total == 0:
+            ui_callback("reap", "Sem anos com situação Enviada", "#94A3B8")
+            return True
+
+        ui_callback("reap", f"{total} ano(s) com situação Enviada", "#60A5FA")
+
+        baixados = 0
+        for idx, item in enumerate(itens, start=1):
+            self.check_stop()
+            ano = item["ano"]
+            btn_id = item["btn_id"]
+
+            try:
+                self.abrir_manutencao_seguro()
+                main_window = self.driver.current_window_handle
+
+                ui_callback("reap", f"Baixando {idx}/{total} (REAP {ano})...", "#FACC15")
+
+                botao = WebDriverWait(self.driver, 6).until(
+                    EC.element_to_be_clickable((By.ID, btn_id))
+                )
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", botao)
+                time.sleep(0.1)
+                self.driver.execute_script("arguments[0].click();", botao)
+
+                blob_handle = self.encontrar_aba_pdf_blob(timeout=10)
+                if not blob_handle:
+                    self.logger.warning(f"Timeout para REAP {ano}.")
+                    continue
+
+                self.driver.switch_to.window(blob_handle)
+                url_blob = self.driver.current_url
+                nome_arquivo = f"REAP{ano}_{nome_pescador}.pdf"
+                caminho_final = os.path.join(pasta_destino, nome_arquivo)
+
+                if self.salvar_blob(url_blob, caminho_final):
+                    baixados += 1
+                    self.logger.info(f"{nome_arquivo} salvo com sucesso.", extra={'tags': 'SUCCESS'})
+                else:
+                    self.logger.error(f"Falha ao salvar REAP {ano}.")
+
+                self.driver.close()
+                self.voltar_para_janela_segura(main_window)
+
+            except Exception as e:
+                self.logger.error(f"Erro no REAP {ano}: {e}")
+                self.voltar_para_janela_segura()
+
+        if baixados == total:
+            ui_callback("reap", f"Salvo com sucesso ({baixados}/{total})", "#10B981")
+            return True
+
+        if baixados > 0:
+            ui_callback("reap", f"Parcial ({baixados}/{total})", "#FACC15")
+            return False
+
+        ui_callback("reap", "Falha ao baixar REAP(s)", "#EF4444")
+        return False
+
     def processar_item_unico(self, id_card, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card):
         self.check_stop()
         
@@ -500,6 +624,7 @@ class AutomationLogic:
                 ui_callback("nome", erro_msg, "#EF4444")
                 ui_callback("carteira", "Cancelado", "#EF4444")
                 ui_callback("certificado", "Cancelado", "#EF4444")
+                ui_callback("reap", "Cancelado", "#EF4444")
                 ui_callback("fim", "", "")
                 return # PARA TOTALMENTE AQUI E AGORA.
 
@@ -519,6 +644,7 @@ class AutomationLogic:
             # Se por acaso deslogar no meio do download, a função retorna ABORT_ALL
             if res_cart == "ABORT_ALL":
                 ui_callback("certificado", "Cancelado", "#EF4444")
+                ui_callback("reap", "Cancelado", "#EF4444")
                 ui_callback("fim", "", "")
                 return
             
@@ -531,6 +657,18 @@ class AutomationLogic:
                 key_ui="certificado", 
                 ui_callback=ui_callback,
                 rotulo_card="certificado"
+            )
+
+            if res_cert == "ABORT_ALL":
+                ui_callback("reap", "Cancelado", "#EF4444")
+                ui_callback("fim", "", "")
+                return
+
+            # 4. DOWNLOAD DOS REAPs (anos enviados)
+            self.baixar_reaps_enviados(
+                nome_pescador=nome_pescador,
+                pasta_destino=pasta_destino,
+                ui_callback=ui_callback
             )
             
             ui_callback("fim", "", "")
