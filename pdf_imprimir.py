@@ -28,7 +28,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 #  CONSTANTES GLOBAIS
 # ==============================================================================
 
-VERSION = "2.8.1 (Logout URL Guard)"
+VERSION = "2.9.0 (Retry + REAP suave)"
 CHROME_DEBUG_PORT = 9222
 BASE_DIR = r"C:\chrome_reap"
 
@@ -64,49 +64,84 @@ class QueueHandler(logging.Handler):
 #  JANELA DE PROGRESSO (POP-UP)
 # ==============================================================================
 class ProgressPopup(ctk.CTkToplevel):
-    def __init__(self, master):
+    def __init__(self, master, on_retry_carteira=None, on_retry_certificado=None, on_retry_reap=None):
         super().__init__(master)
         self.title("Baixando Documentos")
-        self.geometry("520x320")
+        self.geometry("560x380")
         self.attributes("-topmost", True)
-        self.protocol("WM_DELETE_WINDOW", self.bloquear_fechamento) 
-        
+        self.protocol("WM_DELETE_WINDOW", self.bloquear_fechamento)
+
+        self.on_retry_carteira = on_retry_carteira
+        self.on_retry_certificado = on_retry_certificado
+        self.on_retry_reap = on_retry_reap
+
         self.lbl_nome = ctk.CTkLabel(self, text="Pescador: Identificando...", font=("Segoe UI", 14, "bold"), text_color="#60A5FA")
         self.lbl_nome.pack(pady=(15, 10))
-        
+
         self.frame_status = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_status.pack(fill="x", padx=20, pady=5)
-        
+
         self.lbl_carteira = ctk.CTkLabel(self.frame_status, text="Carteira de pescador... [Aguardando]", font=("Segoe UI", 12))
-        self.lbl_carteira.pack(anchor="w", pady=5)
-        
+        self.lbl_carteira.pack(anchor="w", pady=(5, 2))
+        self.btn_retry_carteira = ctk.CTkButton(self.frame_status, text="Tentar novamente Carteira", width=220, height=30, state="disabled", command=self.retry_carteira)
+        self.btn_retry_carteira.pack(anchor="w", pady=(0, 6))
+
         self.lbl_certificado = ctk.CTkLabel(self.frame_status, text="Certificado de regularidade... [Aguardando]", font=("Segoe UI", 12))
-        self.lbl_certificado.pack(anchor="w", pady=5)
+        self.lbl_certificado.pack(anchor="w", pady=(5, 2))
+        self.btn_retry_certificado = ctk.CTkButton(self.frame_status, text="Tentar novamente Certificado", width=220, height=30, state="disabled", command=self.retry_certificado)
+        self.btn_retry_certificado.pack(anchor="w", pady=(0, 6))
 
         self.lbl_reap = ctk.CTkLabel(self.frame_status, text="REAP anual... [Aguardando]", font=("Segoe UI", 12))
-        self.lbl_reap.pack(anchor="w", pady=5)
-        
+        self.lbl_reap.pack(anchor="w", pady=(5, 2))
+        self.btn_retry_reap = ctk.CTkButton(self.frame_status, text="Tentar novamente REAP", width=220, height=30, state="disabled", command=self.retry_reap)
+        self.btn_retry_reap.pack(anchor="w", pady=(0, 6))
+
         self.btn_ok = ctk.CTkButton(self, text="Processando...", state="disabled", command=self.fechar_popup, fg_color="#475569")
-        self.btn_ok.pack(pady=(20, 10))
+        self.btn_ok.pack(pady=(12, 10))
 
     def bloquear_fechamento(self):
-        pass 
+        pass
 
     def fechar_popup(self):
         self.destroy()
 
+    def retry_carteira(self):
+        if callable(self.on_retry_carteira):
+            self.on_retry_carteira()
+
+    def retry_certificado(self):
+        if callable(self.on_retry_certificado):
+            self.on_retry_certificado()
+
+    def retry_reap(self):
+        if callable(self.on_retry_reap):
+            self.on_retry_reap()
+
+    def set_retry_state(self, etapa, habilitar):
+        estado = "normal" if habilitar else "disabled"
+        if etapa == "carteira":
+            self.btn_retry_carteira.configure(state=estado)
+        elif etapa == "certificado":
+            self.btn_retry_certificado.configure(state=estado)
+        elif etapa == "reap":
+            self.btn_retry_reap.configure(state=estado)
+
     def atualizar_etapa(self, etapa, status_texto, cor="white"):
+        texto_norm = (status_texto or "").lower()
         if etapa == "nome":
             self.lbl_nome.configure(text=f"Pescador: {status_texto}", text_color=cor)
         elif etapa == "carteira":
             self.lbl_carteira.configure(text=f"Carteira de pescador... [{status_texto}]", text_color=cor)
+            self.set_retry_state("carteira", "falha" in texto_norm or "erro" in texto_norm or ("pendencia" in texto_norm or "pendência" in texto_norm))
         elif etapa == "certificado":
             self.lbl_certificado.configure(text=f"Certificado de regularidade... [{status_texto}]", text_color=cor)
+            self.set_retry_state("certificado", "falha" in texto_norm or "erro" in texto_norm or ("pendencia" in texto_norm or "pendência" in texto_norm))
         elif etapa == "reap":
             self.lbl_reap.configure(text=f"REAP anual... [{status_texto}]", text_color=cor)
+            self.set_retry_state("reap", "falha" in texto_norm or "erro" in texto_norm)
         elif etapa == "fim":
             self.btn_ok.configure(state="normal", text="Concluir e Fechar", fg_color="#10B981", hover_color="#059669")
-            self.protocol("WM_DELETE_WINDOW", self.fechar_popup) 
+            self.protocol("WM_DELETE_WINDOW", self.fechar_popup)
 
 # ==============================================================================
 #  LÓGICA DO NAVEGADOR (BACKEND)
@@ -405,10 +440,12 @@ class AutomationLogic:
         time.sleep(0.2)
         self.driver.execute_script("arguments[0].click();", card_escolhido)
 
-    def abrir_manutencao_seguro(self):
+    def abrir_manutencao_seguro(self, usar_home=True):
         """Garante contexto na página de manutenções e aborta em caso de redirecionamento para login."""
-        self.ir_para_home_seguro()
-        self.driver.get("https://pesqbrasil-pescadorprofissional.mpa.gov.br/manutencao")
+        if usar_home:
+            self.ir_para_home_seguro()
+        if "manutencao" not in (self.driver.current_url or "").lower():
+            self.driver.get("https://pesqbrasil-pescadorprofissional.mpa.gov.br/manutencao")
         time.sleep(1.2)
         if self.url_indica_logout_ou_login(self.driver.current_url):
             raise Exception("ABORT_LOGIN")
@@ -454,11 +491,11 @@ class AutomationLogic:
         ui_callback("reap", "Buscando anos enviados...", "#FACC15")
 
         try:
-            self.abrir_manutencao_seguro()
+            self.abrir_manutencao_seguro(usar_home=True)
             itens = self.coletar_reaps_enviados()
         except Exception as e:
             if "ABORT_" in str(e):
-                ui_callback("reap", "Erro: Aba incorreta / Deslogado", "#EF4444")
+                ui_callback("reap", "Erro: sessão expirada / deslogado", "#EF4444")
                 return "ABORT_ALL"
             self.logger.error(f"Erro ao abrir manutenção: {e}")
             ui_callback("reap", "Falha ao ler manutenção", "#EF4444")
@@ -469,7 +506,8 @@ class AutomationLogic:
             ui_callback("reap", "Sem anos com situação Enviada", "#94A3B8")
             return True
 
-        ui_callback("reap", f"{total} ano(s) com situação Enviada", "#60A5FA")
+        anos_texto = ", ".join([item["ano"] for item in itens])
+        ui_callback("reap", f"{total} ano(s) enviado(s): {anos_texto}", "#60A5FA")
 
         baixados = 0
         for idx, item in enumerate(itens, start=1):
@@ -478,21 +516,28 @@ class AutomationLogic:
             btn_id = item["btn_id"]
 
             try:
-                self.abrir_manutencao_seguro()
-                main_window = self.driver.current_window_handle
+                try:
+                    main_window = self.driver.current_window_handle
+                except Exception:
+                    self.voltar_para_janela_segura()
+                    main_window = self.driver.current_window_handle
 
-                ui_callback("reap", f"Baixando {idx}/{total} (REAP {ano})...", "#FACC15")
+                if self.url_indica_logout_ou_login(self.driver.current_url):
+                    raise Exception("ABORT_LOGIN")
+
+                ui_callback("reap", f"Ano {ano}: iniciando download ({idx}/{total})", "#FACC15")
 
                 botao = WebDriverWait(self.driver, 6).until(
                     EC.element_to_be_clickable((By.ID, btn_id))
                 )
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", botao)
-                time.sleep(0.1)
+                time.sleep(0.2)
                 self.driver.execute_script("arguments[0].click();", botao)
 
                 blob_handle = self.encontrar_aba_pdf_blob(timeout=10)
                 if not blob_handle:
                     self.logger.warning(f"Timeout para REAP {ano}.")
+                    ui_callback("reap", f"Ano {ano}: timeout ao gerar PDF", "#FACC15")
                     continue
 
                 self.driver.switch_to.window(blob_handle)
@@ -502,27 +547,79 @@ class AutomationLogic:
 
                 if self.salvar_blob(url_blob, caminho_final):
                     baixados += 1
+                    ui_callback("reap", f"Ano {ano}: salvo com sucesso ({baixados}/{total})", "#10B981")
                     self.logger.info(f"{nome_arquivo} salvo com sucesso.", extra={'tags': 'SUCCESS'})
                 else:
                     self.logger.error(f"Falha ao salvar REAP {ano}.")
+                    ui_callback("reap", f"Ano {ano}: falha de gravação", "#EF4444")
 
                 self.driver.close()
                 self.voltar_para_janela_segura(main_window)
 
+                # Fluxo menos agressivo: evita reload completo entre anos.
+                if "manutencao" not in (self.driver.current_url or "").lower():
+                    self.driver.get("https://pesqbrasil-pescadorprofissional.mpa.gov.br/manutencao")
+                    WebDriverWait(self.driver, 6).until(
+                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'table-title') and contains(., 'Minhas manutenções')]"))
+                    )
+                time.sleep(0.4)
+
             except Exception as e:
+                if "ABORT_" in str(e):
+                    ui_callback("reap", "Erro: sessão expirada / deslogado", "#EF4444")
+                    return "ABORT_ALL"
                 self.logger.error(f"Erro no REAP {ano}: {e}")
+                ui_callback("reap", f"Ano {ano}: erro durante o processamento", "#EF4444")
                 self.voltar_para_janela_segura()
 
         if baixados == total:
-            ui_callback("reap", f"Salvo com sucesso ({baixados}/{total})", "#10B981")
+            ui_callback("reap", f"Todos os anos baixados ({baixados}/{total})", "#10B981")
             return True
 
         if baixados > 0:
-            ui_callback("reap", f"Parcial ({baixados}/{total})", "#FACC15")
+            ui_callback("reap", f"Download parcial de anos ({baixados}/{total})", "#FACC15")
             return False
 
         ui_callback("reap", "Falha ao baixar REAP(s)", "#EF4444")
         return False
+
+    def baixar_item_especifico(self, item_tipo, pasta_destino, ui_callback):
+        self.check_stop()
+        try:
+            nome_pescador = self.obter_nome_pescador()
+            ui_callback("nome", nome_pescador, "#60A5FA")
+        except Exception as e:
+            ui_callback(item_tipo, "Erro: Faça login novamente", "#EF4444")
+            self.logger.error(f"Retry {item_tipo} falhou ao validar login: {e}")
+            ui_callback("fim", "", "")
+            return
+
+        if item_tipo == "carteira":
+            self.processar_item_unico(
+                prefixo_arquivo="Carteira",
+                nome_pescador=nome_pescador,
+                pasta_destino=pasta_destino,
+                key_ui="carteira",
+                ui_callback=ui_callback,
+                rotulo_card="carteira de pescador"
+            )
+        elif item_tipo == "certificado":
+            self.processar_item_unico(
+                prefixo_arquivo="Certificado_de_Regularidade",
+                nome_pescador=nome_pescador,
+                pasta_destino=pasta_destino,
+                key_ui="certificado",
+                ui_callback=ui_callback,
+                rotulo_card="certificado de regularidade"
+            )
+        elif item_tipo == "reap":
+            self.baixar_reaps_enviados(
+                nome_pescador=nome_pescador,
+                pasta_destino=pasta_destino,
+                ui_callback=ui_callback
+            )
+
+        ui_callback("fim", "", "")
 
     def processar_item_unico(self, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card):
         self.check_stop()
@@ -692,6 +789,8 @@ class ReapApp(ctk.CTk):
         self.log_queue = queue.Queue()
         self.automation = None 
         self.popup_progresso = None
+        self.pasta_destino_atual = None
+        self.executando_download = False
 
         self.setup_ui()
         self.setup_logging()
@@ -772,25 +871,67 @@ class ReapApp(ctk.CTk):
         if self.popup_progresso and self.popup_progresso.winfo_exists():
             self.after(0, lambda: self.popup_progresso.atualizar_etapa(etapa, texto, cor))
 
+    def _abrir_popup_se_necessario(self):
+        if self.popup_progresso is None or not self.popup_progresso.winfo_exists():
+            self.popup_progresso = ProgressPopup(
+                self,
+                on_retry_carteira=lambda: self.action_retry_item("carteira"),
+                on_retry_certificado=lambda: self.action_retry_item("certificado"),
+                on_retry_reap=lambda: self.action_retry_item("reap")
+            )
+
+    def _executar_com_flag(self, alvo, *args):
+        if self.executando_download:
+            self.logger.info("Aguarde o término do processamento atual.")
+            return
+
+        def runner():
+            self.executando_download = True
+            try:
+                alvo(*args)
+            finally:
+                self.executando_download = False
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def action_retry_item(self, item_tipo):
+        self.stop_event.clear()
+        if not self.automation:
+            self.logger.error("Automação não inicializada.")
+            return
+
+        if not self.pasta_destino_atual:
+            pasta = filedialog.askdirectory(title="Selecione a pasta do Pescador")
+            if not pasta:
+                self.logger.info("Retry cancelado: nenhuma pasta selecionada.")
+                return
+            self.pasta_destino_atual = pasta
+
+        self._executar_com_flag(
+            self.automation.baixar_item_especifico,
+            item_tipo,
+            self.pasta_destino_atual,
+            self.atualizar_ui_popup
+        )
+
     def action_download(self):
         self.stop_event.clear()
-        
+
         pasta_selecionada = filedialog.askdirectory(title="Selecione a pasta do Pescador")
         if not pasta_selecionada:
             self.logger.info("Operação cancelada: Nenhuma pasta selecionada.")
             return
 
+        self.pasta_destino_atual = pasta_selecionada
+
         if self.automation:
-            if self.popup_progresso is None or not self.popup_progresso.winfo_exists():
-                self.popup_progresso = ProgressPopup(self)
-            
-            threading.Thread(target=self.automation.trazer_navegador_frente).start()
-            
-            threading.Thread(
-                target=self.automation.baixar_pacote_documentos, 
-                args=(pasta_selecionada, self.atualizar_ui_popup), 
-                daemon=True
-            ).start()
+            self._abrir_popup_se_necessario()
+            threading.Thread(target=self.automation.trazer_navegador_frente, daemon=True).start()
+            self._executar_com_flag(
+                self.automation.baixar_pacote_documentos,
+                pasta_selecionada,
+                self.atualizar_ui_popup
+            )
 
 if __name__ == "__main__":
     app = ReapApp()
