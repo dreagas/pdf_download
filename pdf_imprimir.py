@@ -28,7 +28,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 #  CONSTANTES GLOBAIS
 # ==============================================================================
 
-VERSION = "2.8.0 (Strict Click + REAP Anual)"
+VERSION = "2.8.1 (Logout URL Guard)"
 CHROME_DEBUG_PORT = 9222
 BASE_DIR = r"C:\chrome_reap"
 
@@ -131,6 +131,21 @@ class AutomationLogic:
     def is_port_in_use(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(('127.0.0.1', port)) == 0
+
+    def url_indica_logout_ou_login(self, url):
+        """Detecta URLs de sessão inválida (login/logout Gov.br/PesqBrasil)."""
+        alvo = (url or "").strip().lower()
+        if not alvo:
+            return False
+
+        sinais = [
+            "/login",
+            "/logout",
+            "sso.acesso.gov.br/logout",
+            "post_logout_redirect_uri=",
+            "pesqbrasil-pescadorprofissional.mpa.gov.br/logout"
+        ]
+        return any(sinal in alvo for sinal in sinais)
 
     def encontrar_executavel_chrome(self):
         try:
@@ -272,7 +287,7 @@ class AutomationLogic:
                 self.driver.switch_to.window(aba_pesqbrasil)
                 self.driver.get(URL_HOME)
                 time.sleep(1.5) # Aguarda redirecionamentos de login
-                if "login" in self.driver.current_url.lower():
+                if self.url_indica_logout_ou_login(self.driver.current_url):
                     raise Exception("ABORT_LOGIN") # Usuário deslogado
                 self.fechar_avisos_iniciais()
                 return True
@@ -282,7 +297,7 @@ class AutomationLogic:
             time.sleep(1.5) # Aguarda redirecionamentos de login na nova guia
             self.driver.switch_to.window(self.driver.window_handles[-1])
             
-            if "login" in self.driver.current_url.lower():
+            if self.url_indica_logout_ou_login(self.driver.current_url):
                 raise Exception("ABORT_LOGIN") # Caiu no Login
                 
             self.fechar_avisos_iniciais()
@@ -395,7 +410,7 @@ class AutomationLogic:
         self.ir_para_home_seguro()
         self.driver.get("https://pesqbrasil-pescadorprofissional.mpa.gov.br/manutencao")
         time.sleep(1.2)
-        if "login" in self.driver.current_url.lower():
+        if self.url_indica_logout_ou_login(self.driver.current_url):
             raise Exception("ABORT_LOGIN")
 
         WebDriverWait(self.driver, 6).until(
