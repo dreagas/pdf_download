@@ -28,7 +28,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 #  CONSTANTES GLOBAIS
 # ==============================================================================
 
-VERSION = "2.9.0 (Retry + REAP suave)"
+VERSION = "2.9.1 (Carteira Wait + Sessao Suave)"
 CHROME_DEBUG_PORT = 9222
 BASE_DIR = r"C:\chrome_reap"
 
@@ -411,16 +411,9 @@ class AutomationLogic:
         nfkd_form = unicodedata.normalize('NFKD', (texto or '').lower())
         return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
-    def clicar_card_seguro(self, rotulo_esperado):
-        """Clica no card da home pelo texto visível, evitando IDs dinâmicos/corrompidos."""
-        WebDriverWait(self.driver, 8).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".card-home-menu .card-main-text"))
-        )
-
+    def _buscar_card_por_rotulo(self, rotulo_esperado):
         rotulo_norm = self._normalizar_texto(rotulo_esperado)
         cards = self.driver.find_elements(By.CSS_SELECTOR, ".card-home-menu")
-        card_escolhido = None
-
         for card in cards:
             try:
                 if not card.is_displayed():
@@ -428,18 +421,45 @@ class AutomationLogic:
                 texto_el = card.find_element(By.CSS_SELECTOR, ".card-main-text")
                 texto_card = self._normalizar_texto(texto_el.text)
                 if rotulo_norm and rotulo_norm in texto_card:
-                    card_escolhido = card
-                    break
+                    return card
             except Exception:
                 continue
+        return None
+
+    def aguardar_sessao_ativa(self, timeout=4):
+        """Espera curta para confirmar sessão ativa e evitar navegação em estado inválido."""
+        def _ok(_):
+            try:
+                return not self.url_indica_logout_ou_login(self.driver.current_url)
+            except Exception:
+                return False
+        if not WebDriverWait(self.driver, timeout).until(_ok):
+            raise Exception("ABORT_LOGIN")
+
+    def clicar_card_seguro(self, rotulo_esperado):
+        """Clica no card da home pelo texto visível com espera explícita (WebDriverWait)."""
+        WebDriverWait(self.driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".card-home-menu .card-main-text"))
+        )
+
+        card_escolhido = WebDriverWait(self.driver, 8).until(
+            lambda d: self._buscar_card_por_rotulo(rotulo_esperado)
+        )
 
         if not card_escolhido:
             raise NoSuchElementException(f"Card com rótulo '{rotulo_esperado}' não encontrado na home.")
 
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card_escolhido)
-        time.sleep(0.2)
-        self.driver.execute_script("arguments[0].click();", card_escolhido)
+        WebDriverWait(self.driver, 6).until(lambda d: card_escolhido.is_displayed() and card_escolhido.size.get('height', 0) > 0)
+        time.sleep(0.15)
 
+        # Prioriza botão interno clicável quando existir.
+        try:
+            botao_interno = card_escolhido.find_element(By.XPATH, ".//button[not(@disabled)]")
+            WebDriverWait(self.driver, 4).until(lambda d: botao_interno.is_displayed() and botao_interno.is_enabled())
+            self.driver.execute_script("arguments[0].click();", botao_interno)
+        except Exception:
+            self.driver.execute_script("arguments[0].click();", card_escolhido)
     def abrir_manutencao_seguro(self, usar_home=True):
         """Garante contexto na página de manutenções e aborta em caso de redirecionamento para login."""
         if usar_home:
@@ -491,7 +511,7 @@ class AutomationLogic:
         ui_callback("reap", "Buscando anos enviados...", "#FACC15")
 
         try:
-            self.abrir_manutencao_seguro(usar_home=True)
+            self.abrir_manutencao_seguro(usar_home=False)
             itens = self.coletar_reaps_enviados()
         except Exception as e:
             if "ABORT_" in str(e):
@@ -601,7 +621,8 @@ class AutomationLogic:
                 pasta_destino=pasta_destino,
                 key_ui="carteira",
                 ui_callback=ui_callback,
-                rotulo_card="carteira de pescador"
+                rotulo_card="carteira de pescador",
+                timeout_blob=12
             )
         elif item_tipo == "certificado":
             self.processar_item_unico(
@@ -610,7 +631,8 @@ class AutomationLogic:
                 pasta_destino=pasta_destino,
                 key_ui="certificado",
                 ui_callback=ui_callback,
-                rotulo_card="certificado de regularidade"
+                rotulo_card="certificado de regularidade",
+                timeout_blob=9
             )
         elif item_tipo == "reap":
             self.baixar_reaps_enviados(
@@ -621,7 +643,7 @@ class AutomationLogic:
 
         ui_callback("fim", "", "")
 
-    def processar_item_unico(self, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card):
+    def processar_item_unico(self, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card, timeout_blob=7):
         self.check_stop()
         
         MAX_TENTATIVAS = 3
@@ -637,6 +659,7 @@ class AutomationLogic:
                 if tentativa > 0: ui_callback(key_ui, f"Tentando novamente ({tentativa+1})...", "#FACC15")
                 else: ui_callback(key_ui, "Aguardando clique...", "#FACC15") 
                 
+                self.aguardar_sessao_ativa(timeout=4)
                 ui_callback(key_ui, "Aguardando gerador...", "#60A5FA")
                 self.clicar_card_seguro(rotulo_card)
                 
@@ -655,7 +678,7 @@ class AutomationLogic:
                     pass 
                     
                 # Busca rápida pela aba
-                blob_handle = self.encontrar_aba_pdf_blob(timeout=7)
+                blob_handle = self.encontrar_aba_pdf_blob(timeout=timeout_blob)
                 if blob_handle:
                     ui_callback(key_ui, "Baixando arquivo...", "#FACC15")
                     self.driver.switch_to.window(blob_handle)
@@ -732,7 +755,8 @@ class AutomationLogic:
                 pasta_destino=pasta_destino, 
                 key_ui="carteira", 
                 ui_callback=ui_callback,
-                rotulo_card="carteira de pescador"
+                rotulo_card="carteira de pescador",
+                timeout_blob=12
             )
             
             # Se por acaso deslogar no meio do download, a função retorna ABORT_ALL
@@ -749,7 +773,8 @@ class AutomationLogic:
                 pasta_destino=pasta_destino, 
                 key_ui="certificado", 
                 ui_callback=ui_callback,
-                rotulo_card="certificado de regularidade"
+                rotulo_card="certificado de regularidade",
+                timeout_blob=9
             )
 
             if res_cert == "ABORT_ALL":
