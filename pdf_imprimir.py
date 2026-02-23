@@ -361,51 +361,34 @@ class AutomationLogic:
         nfkd_form = unicodedata.normalize('NFKD', (texto or '').lower())
         return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
-    def clicar_card_seguro(self, id_card, rotulo_esperado):
-        """Clica no card correto com validação de texto visível para evitar card trocado na 1ª tentativa."""
-        WebDriverWait(self.driver, 6).until(EC.presence_of_element_located((By.ID, id_card)))
-
-        candidatos = self.driver.find_elements(By.ID, id_card)
-        if not candidatos:
-            raise NoSuchElementException(f"Card não encontrado: {id_card}")
+    def clicar_card_seguro(self, rotulo_esperado):
+        """Clica no card da home pelo texto visível, evitando IDs dinâmicos/corrompidos."""
+        WebDriverWait(self.driver, 8).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".card-home-menu .card-main-text"))
+        )
 
         rotulo_norm = self._normalizar_texto(rotulo_esperado)
+        cards = self.driver.find_elements(By.CSS_SELECTOR, ".card-home-menu")
         card_escolhido = None
 
-        # 1) Prioriza card visível cujo texto combine com o esperado.
-        for card in candidatos:
+        for card in cards:
             try:
                 if not card.is_displayed():
                     continue
-                texto_card = self._normalizar_texto(card.text)
+                texto_el = card.find_element(By.CSS_SELECTOR, ".card-main-text")
+                texto_card = self._normalizar_texto(texto_el.text)
                 if rotulo_norm and rotulo_norm in texto_card:
                     card_escolhido = card
                     break
-            except WebDriverException:
+            except Exception:
                 continue
 
-        # 2) Fallback: usa o primeiro visível.
         if not card_escolhido:
-            for card in candidatos:
-                try:
-                    if card.is_displayed():
-                        card_escolhido = card
-                        break
-                except WebDriverException:
-                    continue
-
-        if not card_escolhido:
-            card_escolhido = candidatos[0]
+            raise NoSuchElementException(f"Card com rótulo '{rotulo_esperado}' não encontrado na home.")
 
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card_escolhido)
         time.sleep(0.2)
-
-        # Tenta clicar no botão interno primeiro para evitar propagação em container incorreto.
-        try:
-            botao_interno = card_escolhido.find_element(By.XPATH, ".//button[not(@disabled)]")
-            self.driver.execute_script("arguments[0].click();", botao_interno)
-        except NoSuchElementException:
-            self.driver.execute_script("arguments[0].click();", card_escolhido)
+        self.driver.execute_script("arguments[0].click();", card_escolhido)
 
     def abrir_manutencao_seguro(self):
         """Garante contexto na página de manutenções e aborta em caso de redirecionamento para login."""
@@ -526,7 +509,7 @@ class AutomationLogic:
         ui_callback("reap", "Falha ao baixar REAP(s)", "#EF4444")
         return False
 
-    def processar_item_unico(self, id_card, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card):
+    def processar_item_unico(self, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card):
         self.check_stop()
         
         MAX_TENTATIVAS = 3
@@ -543,7 +526,7 @@ class AutomationLogic:
                 else: ui_callback(key_ui, "Aguardando clique...", "#FACC15") 
                 
                 ui_callback(key_ui, "Aguardando gerador...", "#60A5FA")
-                self.clicar_card_seguro(id_card, rotulo_card)
+                self.clicar_card_seguro(rotulo_card)
                 
                 # Check de notificação
                 try:
@@ -632,13 +615,12 @@ class AutomationLogic:
 
             # 2. DOWNLOAD DA CARTEIRA
             res_cart = self.processar_item_unico(
-                id_card="card_____ra", 
                 prefixo_arquivo="Carteira", 
                 nome_pescador=nome_pescador, 
                 pasta_destino=pasta_destino, 
                 key_ui="carteira", 
                 ui_callback=ui_callback,
-                rotulo_card="carteira"
+                rotulo_card="carteira de pescador"
             )
             
             # Se por acaso deslogar no meio do download, a função retorna ABORT_ALL
@@ -650,13 +632,12 @@ class AutomationLogic:
             
             # 3. DOWNLOAD DO CERTIFICADO
             res_cert = self.processar_item_unico(
-                id_card="card_____rb", 
                 prefixo_arquivo="Certificado_de_Regularidade", 
                 nome_pescador=nome_pescador, 
                 pasta_destino=pasta_destino, 
                 key_ui="certificado", 
                 ui_callback=ui_callback,
-                rotulo_card="certificado"
+                rotulo_card="certificado de regularidade"
             )
 
             if res_cert == "ABORT_ALL":
