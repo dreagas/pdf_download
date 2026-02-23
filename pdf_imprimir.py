@@ -352,7 +352,57 @@ class AutomationLogic:
             self.logger.error(f"Erro JS Blob: {e}")
             return False
 
-    def processar_item_unico(self, id_card, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback):
+    def _normalizar_texto(self, texto):
+        nfkd_form = unicodedata.normalize('NFKD', (texto or '').lower())
+        return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+    def clicar_card_seguro(self, id_card, rotulo_esperado):
+        """Clica no card correto com validação de texto visível para evitar card trocado na 1ª tentativa."""
+        WebDriverWait(self.driver, 6).until(EC.presence_of_element_located((By.ID, id_card)))
+
+        candidatos = self.driver.find_elements(By.ID, id_card)
+        if not candidatos:
+            raise NoSuchElementException(f"Card não encontrado: {id_card}")
+
+        rotulo_norm = self._normalizar_texto(rotulo_esperado)
+        card_escolhido = None
+
+        # 1) Prioriza card visível cujo texto combine com o esperado.
+        for card in candidatos:
+            try:
+                if not card.is_displayed():
+                    continue
+                texto_card = self._normalizar_texto(card.text)
+                if rotulo_norm and rotulo_norm in texto_card:
+                    card_escolhido = card
+                    break
+            except WebDriverException:
+                continue
+
+        # 2) Fallback: usa o primeiro visível.
+        if not card_escolhido:
+            for card in candidatos:
+                try:
+                    if card.is_displayed():
+                        card_escolhido = card
+                        break
+                except WebDriverException:
+                    continue
+
+        if not card_escolhido:
+            card_escolhido = candidatos[0]
+
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card_escolhido)
+        time.sleep(0.2)
+
+        # Tenta clicar no botão interno primeiro para evitar propagação em container incorreto.
+        try:
+            botao_interno = card_escolhido.find_element(By.XPATH, ".//button[not(@disabled)]")
+            self.driver.execute_script("arguments[0].click();", botao_interno)
+        except NoSuchElementException:
+            self.driver.execute_script("arguments[0].click();", card_escolhido)
+
+    def processar_item_unico(self, id_card, prefixo_arquivo, nome_pescador, pasta_destino, key_ui, ui_callback, rotulo_card):
         self.check_stop()
         
         MAX_TENTATIVAS = 3
@@ -368,13 +418,8 @@ class AutomationLogic:
                 if tentativa > 0: ui_callback(key_ui, f"Tentando novamente ({tentativa+1})...", "#FACC15")
                 else: ui_callback(key_ui, "Aguardando clique...", "#FACC15") 
                 
-                # Clique Sniper
-                card = WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.ID, id_card)))
-                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", card)
-                time.sleep(0.1) 
-                
                 ui_callback(key_ui, "Aguardando gerador...", "#60A5FA")
-                self.driver.execute_script("arguments[0].click();", card)
+                self.clicar_card_seguro(id_card, rotulo_card)
                 
                 # Check de notificação
                 try:
@@ -467,7 +512,8 @@ class AutomationLogic:
                 nome_pescador=nome_pescador, 
                 pasta_destino=pasta_destino, 
                 key_ui="carteira", 
-                ui_callback=ui_callback
+                ui_callback=ui_callback,
+                rotulo_card="carteira"
             )
             
             # Se por acaso deslogar no meio do download, a função retorna ABORT_ALL
@@ -483,7 +529,8 @@ class AutomationLogic:
                 nome_pescador=nome_pescador, 
                 pasta_destino=pasta_destino, 
                 key_ui="certificado", 
-                ui_callback=ui_callback
+                ui_callback=ui_callback,
+                rotulo_card="certificado"
             )
             
             ui_callback("fim", "", "")
